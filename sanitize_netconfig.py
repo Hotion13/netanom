@@ -1,87 +1,91 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-sanitize_netconfig.py — Anonymiseur de configurations reseau
-============================================================
+sanitize_netconfig.py — Network configuration sanitizer
+========================================================
 
-Cible : Cisco (IOS / IOS-XE / NX-OS) et Arista EOS.
-But    : retirer ou pseudonymiser les informations sensibles d'un fichier de
-         configuration AVANT de le transmettre a une IA (ou tout tiers), sans
-         casser la coherence interne necessaire a une analyse.
+Targets : Cisco (IOS / IOS-XE / NX-OS) and Arista EOS.
+Purpose : strip or pseudonymize sensitive information from a configuration
+          file BEFORE sending it to an AI (or any third party), without
+          breaking the internal consistency required for a useful analysis.
 
-Deux familles de traitement
----------------------------
-1. SECRETS  -> DESTRUCTION. La vraie valeur est remplacee par un marqueur
-   (ex. <SANITIZED-SECRET>) et n'est jamais conservee nulle part. On garde
-   quand meme l'indice d'algorithme (type 7, type 9, sha512, RO/RW, ACL...)
-   car c'est une info de securite utile et NON confidentielle.
+Two families of treatment
+-------------------------
+1. SECRETS  -> DESTRUCTION. The real value is replaced by a marker
+   (e.g. <SANITIZED-SECRET>) and is never stored anywhere. The algorithm
+   hint (type 7, type 9, sha512, RO/RW, ACL...) is kept, as it is useful
+   security information and NOT confidential.
 
-2. IDENTIFIANTS -> PSEUDONYMISATION COHERENTE. Une meme valeur d'origine est
-   toujours remplacee par le meme alias (host-1, 198.51.100.x, example-1.net...)
-   afin que les relations du fichier restent exploitables par l'IA. La table de
-   correspondance peut etre ecrite dans un fichier .map.json a CONSERVER EN
-   LOCAL : elle permet de re-appliquer ensuite les recommandations de l'IA a la
-   vraie configuration. Ce fichier ne doit JAMAIS etre transmis a l'IA.
+2. IDENTIFIERS -> CONSISTENT PSEUDONYMIZATION. A given original value is
+   always replaced by the same alias (device-1, 198.51.100.x,
+   example-1.net...) so that the relationships within the file remain
+   usable by the AI. The mapping table can be written to a .map.json file
+   to be KEPT LOCALLY: it lets you re-apply the AI's recommendations to
+   the real configuration afterwards. That file must NEVER be sent to the
+   AI or to any third party.
 
-Ce qui est neutralise
+What gets neutralized
 ---------------------
-SECRETS DETRUITS :
-  - enable secret / enable password (tous types : 0,5,7,8,9, sha512)
+DESTROYED SECRETS:
+  - enable secret / enable password (all types: 0,5,7,8,9, sha512)
   - username ... secret/password (incl. EOS "secret sha512")
-  - cles publiques SSH des comptes (username ... sshkey ...) : identifiantes
-  - mots de passe de lignes (line con/vty/aux : password ...)
-  - communautes SNMP (snmp-server community) + communaute dans snmp-server
-    host (y compris formes vrf / use-vrf / traps / informs / version 1|2c|3)
-  - cles SNMPv3 (auth md5/sha[-]..., priv des/aes[-128...], formes NX-OS 0x...)
-  - cles TACACS+ / RADIUS (tacacs-server key, radius-server ... key, blocs
-    "radius server X" / "tacacs server X" avec "key" indente, key 7 ...)
-  - cle maitre de chiffrement (key config-key password-encrypt)
-  - cles pre-partagees VPN (crypto isakmp key [0|6|encrypted], pre-shared-key)
-  - authentification de voisinage / routage (neighbor ... password, OSPF
+  - user SSH public keys (username ... sshkey ...): identifying material
+  - line passwords (line con/vty/aux: password ...)
+  - SNMP communities (snmp-server community) and the community embedded in
+    snmp-server host (incl. vrf / use-vrf / traps / informs / version 1|2c|3)
+  - SNMPv3 keys (auth md5/sha[-]..., priv des/aes[-128...], NX-OS 0x... forms)
+  - TACACS+ / RADIUS keys (tacacs-server key, radius-server ... key, and
+    "radius server X" / "tacacs server X" blocks with an indented "key",
+    key 7 ...)
+  - password-encryption master key (key config-key password-encrypt)
+  - VPN pre-shared keys (crypto isakmp key [0|6|encrypted], pre-shared-key)
+  - neighbor / routing-protocol authentication (neighbor ... password, OSPF
     message-digest-key md5, authentication-key, authentication text,
     IS-IS isis password / area-password / domain-password)
-  - authentification FHRP en clair (standby / vrrp ... authentication)
+  - plaintext FHRP authentication (standby / vrrp ... authentication)
   - key-string (key chains)
   - PPP CHAP/PAP, ip ftp password, ip http client password,
-    cle d'authentification NTP
-  - certificats PKI (blocs hex IOS) et blocs PEM (-----BEGIN...-----END-----)
-  - bannieres (banner motd/login/exec ...) souvent porteuses d'infos org/legales
-  - adresses e-mail
+    NTP authentication keys
+  - PKI certificates (IOS hex blobs) and PEM blocks
+    (-----BEGIN...-----END-----)
+  - banners (banner motd/login/exec ...), which often carry
+    organizational/legal information
+  - e-mail addresses
 
-IDENTIFIANTS PSEUDONYMISES (coherents) :
-  - hostname / switchname / sysname  -> device-N (remplace partout, insensible
-    a la casse, y compris au sein d'un FQDN "hote.domaine")
-  - domaine (ip domain-name / domain list / dns domain / domain-name DHCP)
-    -> example-N.net (remplace partout, y compris en suffixe de FQDN)
-  - adresses IPv4 publiques -> plages de documentation RFC 5737, puis
-    198.18.0.0/15 (RFC 2544) si plus de ~760 adresses distinctes
-  - adresses IPv6 publiques -> 2001:db8::/32 (RFC 3849)
-  - adresses MAC -> MAC d'administration locale fictive (format conserve,
-    coherent entre notations aabb.ccdd.eeff et aa:bb:cc:dd:ee:ff) ; les MAC
-    multicast/broadcast et les MAC virtuelles bien connues (HSRP, VRRP,
-    GLBP) sont conservees car porteuses de sens et non identifiantes
-  - descriptions d'interface -> jeton coherent (option --keep-descriptions)
-  - snmp-server location / contact -> marqueur (adresse, tel, nom => sensibles)
+PSEUDONYMIZED IDENTIFIERS (consistent):
+  - hostname / switchname / sysname  -> device-N (replaced everywhere,
+    case-insensitive, including inside "host.domain" FQDNs)
+  - domain (ip domain-name / domain list / dns domain / DHCP domain-name)
+    -> example-N.net (replaced everywhere, including as an FQDN suffix)
+  - public IPv4 addresses -> RFC 5737 documentation ranges, then
+    198.18.0.0/15 (RFC 2544) beyond ~760 distinct addresses
+  - public IPv6 addresses -> 2001:db8::/32 (RFC 3849)
+  - MAC addresses -> fictitious locally-administered MACs (format preserved,
+    consistent across the aabb.ccdd.eeff and aa:bb:cc:dd:ee:ff notations);
+    multicast/broadcast MACs and well-known virtual MACs (HSRP, VRRP, GLBP)
+    are kept, as they carry protocol meaning and are not identifying
+  - interface descriptions -> consistent token (--keep-descriptions to keep)
+  - snmp-server location / contact -> marker (address, phone, name are
+    sensitive)
 
-Limites (IMPORTANT)
--------------------
-Outil "best effort" base sur des motifs. Il ne remplace PAS une relecture
-humaine. Pensez en particulier a verifier manuellement : noms de VRF, de
-route-map, d'ACL, de trustpoint, numeros de serie/licence, identifiants de
-circuit dans les descriptions, jetons d'agents EOS (daemon TerminAttr...),
-cles PSK WLAN, snmp engineID, valeurs numeriques pures apres "key" (ambigues
-avec un numero de cle de key chain), et tout secret a syntaxe exotique.
-Les masques/prefixes ne sont pas recalcules : une adresse reseau remplacee
-peut devenir une adresse hote (la coherence de sous-reseau n'est pas
-garantie). Le script affiche en fin de traitement les lignes residuelles qui
-ressemblent encore a un secret : relisez-les.
+Limitations (IMPORTANT)
+-----------------------
+Best-effort, pattern-based tool. It does NOT replace a human review. In
+particular, manually check: VRF / route-map / ACL / trustpoint names,
+serial and license numbers, circuit IDs inside descriptions, EOS agent
+tokens (daemon TerminAttr...), WLAN PSKs, snmp engineID, purely numeric
+values after "key" (ambiguous with a key-chain key number), and any secret
+with an exotic syntax. Masks/prefixes are not recomputed: a replaced
+network address may become a host address (subnet consistency is not
+guaranteed). At the end of processing the script prints the residual lines
+that still look like secrets: review them.
 
 Usage
 -----
+  netanom config.txt -o config.san.txt -m config.map.json      (installed CLI)
   python3 sanitize_netconfig.py config.txt -o config.san.txt -m config.map.json
   cat config.txt | python3 sanitize_netconfig.py - > config.san.txt
   python3 sanitize_netconfig.py config.txt --anonymize-all-ips --keep-descriptions
-  python3 sanitize_netconfig.py config.txt --strict   # code retour 2 si residu
+  python3 sanitize_netconfig.py config.txt --strict   # exit code 2 on residue
 """
 
 import argparse
@@ -91,13 +95,13 @@ import re
 import sys
 from itertools import count
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ---------------------------------------------------------------------------
-# Marqueurs
+# Markers
 # ---------------------------------------------------------------------------
 def ph(category: str) -> str:
-    """Retourne un marqueur de censure homogene pour une categorie donnee."""
+    """Return a homogeneous redaction marker for a given category."""
     return f"<SANITIZED-{category}>"
 
 S_SECRET = ph("SECRET")
@@ -110,69 +114,69 @@ S_CERT = ph("CERTIFICATE-OR-KEY")
 S_SSHKEY = ph("SSH-KEY")
 
 # ---------------------------------------------------------------------------
-# Regles de DESTRUCTION des secrets
-# Chaque regle = (regex compilee, chaine de remplacement).
-# Convention : on conserve la "directive" + l'indice d'algorithme via des
-# groupes capturants, on detruit uniquement la valeur sensible.
-# ORDRE IMPORTANT : du plus specifique au plus generique. La regle inline
-# "key <type> <valeur>" est volontairement en DERNIER et ne matche jamais a
-# l'interieur d'une directive suffixee en -key (message-digest-key, etc.),
-# sinon elle detruirait le jeton d'algorithme et laisserait fuir le secret.
+# Secret DESTRUCTION rules
+# Each rule = (compiled regex, replacement string).
+# Convention: keep the "directive" plus the algorithm hint through capturing
+# groups, destroy only the sensitive value.
+# ORDER MATTERS: from most specific to most generic. The inline
+# "key <type> <value>" rule is deliberately LAST and never matches inside a
+# hyphenated -key directive (message-digest-key, etc.), otherwise it would
+# destroy the algorithm token and let the actual secret leak.
 # ---------------------------------------------------------------------------
 _F = re.IGNORECASE
 SECRET_RULES = [
-    # enable secret/password [level N] [0|5|7|8|9|sha512...] <valeur>
+    # enable secret/password [level N] [0|5|7|8|9|sha512...] <value>
     (re.compile(r'^(\s*enable\s+(?:secret|password)(?:\s+level\s+\d+)?'
                 r'(?:\s+(?:0|5|7|8|9|sha512|sha256|md5))?\s+)\S+.*$', _F),
      r'\1' + S_SECRET),
 
-    # username X [privilege N] [role ...] secret|password [algo] <hash> [reste]
+    # username X [privilege N] [role ...] secret|password [algo] <hash> [rest]
     (re.compile(r'^(\s*username\s+\S+\s+.*?\b(?:secret|password)'
                 r'(?:\s+(?:sha512|sha256|md5|0|5|7|8|9))?\s+)(\S+)(.*)$', _F),
      r'\1' + S_SECRET + r'\3'),
-    # cle publique SSH d'un compte (EOS "username X sshkey ssh-rsa ...") :
-    # pas un secret, mais identifiante (commentaire, correlation possible)
+    # account SSH public key (EOS "username X sshkey ssh-rsa ..."):
+    # not a secret, but identifying (comment field, correlation potential)
     (re.compile(r'^(\s*username\s+\S+\s+ssh-?key\s+).*$', _F),
      r'\1' + S_SSHKEY),
 
-    # mot de passe de ligne ou generique : password [type] <valeur>
+    # line password or generic: password [type] <value>
     (re.compile(r'^(\s*password\s+(?:\d\s+)?)\S+.*$', _F),
      r'\1' + S_SECRET),
-    # secret nu (rare hors username) : secret [algo] <valeur>
+    # bare secret (rare outside username): secret [algo] <value>
     (re.compile(r'^(\s*secret\s+(?:sha512\s+|sha256\s+|\d\s+)?)\S+.*$', _F),
      r'\1' + S_SECRET),
 
-    # SNMP : communaute  (on garde RO/RW + ACL eventuelle)
+    # SNMP: community (keep RO/RW and the optional ACL)
     (re.compile(r'^(\s*snmp-server\s+community\s+)\S+(.*)$', _F),
      r'\1' + S_COMMUNITY + r'\2'),
-    # SNMP host : toutes formes IOS/NX-OS/EOS. On saute les mots-cles connus
-    # (vrf X, use-vrf X, traps, informs, version X, auth/noauth/priv) puis on
-    # detruit le jeton suivant = communaute (ou utilisateur v3, identifiant).
+    # SNMP host: every IOS/NX-OS/EOS form. Skip the known keywords (vrf X,
+    # use-vrf X, traps, informs, version X, auth/noauth/priv) then destroy
+    # the next token = community (or v3 user, an identifier).
     (re.compile(r'^(\s*snmp-server\s+host\s+\S+'
                 r'(?:\s+(?:(?:vrf|use-vrf|filter-vrf|version)\s+\S+'
                 r'|traps|informs|auth|noauth|priv))*'
                 r'\s+)(?!(?:vrf|use-vrf|filter-vrf|version|traps|informs'
                 r'|auth|noauth|priv|udp-port)\b)(\S+)(.*)$', _F),
      r'\1' + S_COMMUNITY + r'\3'),
-    # SNMPv3 : auth md5|sha|sha-256... <cle>  /  priv des|3des|aes[- ]128... <cle>
+    # SNMPv3: auth md5|sha|sha-256... <key>  /  priv des|3des|aes[- ]128... <key>
     (re.compile(r'(\bauth\s+(?:md5|sha-?(?:512|384|256|224)?)\s+)(\S+)', _F),
      r'\1' + S_SECRET),
     (re.compile(r'(\bpriv\s+(?:des|3des|aes(?:[\s-]+(?:128|192|256))?)\s+)(\S+)', _F),
      r'\1' + S_SECRET),
-    # forme NX-OS localisee : priv 0x<hex> (sans mot-cle d'algo)
+    # NX-OS localized form: priv 0x<hex> (no algorithm keyword)
     (re.compile(r'(\bpriv\s+)(0x[0-9A-Fa-f]+)', _F),
      r'\1' + S_SECRET),
 
-    # TACACS+ / RADIUS : ligne globale, quel que soit ce qui precede "key"
+    # TACACS+ / RADIUS: global line, whatever precedes "key"
     # (host, auth-port, acct-port, timeout...)
     (re.compile(r'^(\s*(?:tacacs|radius)-server\s+.*?\bkey\s+(?:\d\s+)?)\S.*$', _F),
      r'\1' + S_SECRET),
-    # cle maitre de chiffrement des mots de passe (AES password encryption)
+    # password-encryption master key (AES password encryption)
     (re.compile(r'^(\s*key\s+config-key\s+password-encrypt\s+)\S.*$', _F),
      r'\1' + S_SECRET),
-    # "key [type] <valeur>" en debut de ligne (blocs "radius server X" /
-    # "tacacs server X"). Ne touche ni "key chain X", ni un numero de cle
-    # de key chain ("key 1"), ni "key config-key ..." (regle dediee ci-dessus).
+    # "key [type] <value>" at the start of a line ("radius server X" /
+    # "tacacs server X" blocks). Leaves "key chain X", key-chain key numbers
+    # ("key 1") and "key config-key ..." (dedicated rule above) untouched.
     (re.compile(r'^(\s*key\s+(?:\d\s+)?)(?!chain\b|config-key\b|\d+\s*$)\S.*$', _F),
      r'\1' + S_SECRET),
 
@@ -183,7 +187,7 @@ SECRET_RULES = [
                 r'(?!address\b|hostname\b)(\S+)', _F),
      r'\1' + S_SECRET),
 
-    # Routage : BGP / OSPF / divers
+    # Routing: BGP / OSPF / misc
     (re.compile(r'(\bneighbor\s+\S+\s+password\s+(?:\d\s+)?)(\S+)', _F),
      r'\1' + S_SECRET),
     (re.compile(r'(\bmessage-digest-key\s+\d+\s+md5\s+(?:\d\s+)?)(\S+)', _F),
@@ -192,12 +196,12 @@ SECRET_RULES = [
      r'\1' + S_SECRET),
     (re.compile(r'(\bauthentication\s+text\s+)(\S+)', _F),
      r'\1' + S_SECRET),
-    # IS-IS : isis password / area-password / domain-password [hmac-md5] <pw>
+    # IS-IS: isis password / area-password / domain-password [hmac-md5] <pw>
     (re.compile(r'^(\s*(?:isis\s+password|(?:area|domain)-password)\s+'
                 r'(?:hmac-md5\s+)?)(\S+)(.*)$', _F),
      r'\1' + S_SECRET + r'\3'),
-    # FHRP : standby/vrrp ... authentication <pw-en-clair>
-    # (les formes md5/text/key-string/key-chain sont gerees par d'autres regles)
+    # FHRP: standby/vrrp ... authentication <plaintext-pw>
+    # (md5/text/key-string/key-chain forms are handled by other rules)
     (re.compile(r'^(\s*(?:standby|vrrp)\s+(?:\d+\s+)?authentication\s+)'
                 r'(?!md5\b|text\b|key-string\b|key-chain\b)(\S+)(.*)$', _F),
      r'\1' + S_SECRET + r'\3'),
@@ -217,31 +221,31 @@ SECRET_RULES = [
                 r'(?:md5|sha\d*|hmac-sha[0-9-]*|cmac-aes-\d+)\s+(?:\d\s+)?)(\S+)', _F),
      r'\1' + S_SECRET),
 
-    # Generique inline "... key <type> <valeur>" — EN DERNIER. Le lookbehind
-    # interdit le match au sein de "message-digest-key", "authentication-key",
-    # "pre-shared-key", etc. (directives deja traitees plus haut).
+    # Generic inline "... key <type> <value>" — LAST. The lookbehind forbids
+    # matching inside "message-digest-key", "authentication-key",
+    # "pre-shared-key", etc. (directives already handled above).
     (re.compile(r'((?<![\w-])key\s+(?:0|5|7|8|9)\s+)(\S+)', _F),
      r'\1' + S_SECRET),
 ]
 
-# Regles "valeur libre" -> marqueur (pas de pseudonymisation, on detruit)
+# "Free text value" rules -> marker (no pseudonymization, destroy)
 LOCATION_RX = re.compile(r'^(\s*snmp-server\s+location\s+).*$', _F)
 CONTACT_RX = re.compile(r'^(\s*snmp-server\s+contact\s+).*$', _F)
 DESCRIPTION_RX = re.compile(r'^(\s*description\s+)(.*)$', _F)
 
-# Captures d'identifiants (passe de collecte)
+# Identifier captures (collection pass)
 HOSTNAME_RX = re.compile(r'^\s*(?:hostname|switchname|sysname)\s+(\S+)\s*$', _F)
 DOMAIN_RX = re.compile(r'^\s*(?:ip\s+)?(?:domain[\s-](?:name|list)|dns\s+domain)\s+'
                        r'(?:vrf\s+\S+\s+)?(\S+)\s*$', _F)
 
-# Bloc PEM / banniere / blob hex
+# PEM block / banner / hex blob
 PEM_BEGIN_RX = re.compile(r'-----BEGIN [^-]+-----')
 PEM_END_RX = re.compile(r'-----END [^-]+-----')
 BANNER_RX = re.compile(r'^(\s*banner\s+\S+)\s?(.*)$', _F)
 
 EMAIL_RX = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
 
-# Adresses
+# Addresses
 IPV4_RX = re.compile(r'(?<![\w.])((?:\d{1,3}\.){3}\d{1,3})(/\d{1,2})?(?![\w.])')
 IPV6_RX = re.compile(
     r'(?<![:\w.])('
@@ -262,17 +266,17 @@ MAC_COLON_RX = re.compile(r'(?<![\w:.])((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})(?!
 
 NET0_8 = ipaddress.ip_network("0.0.0.0/8")
 
-# MAC virtuelles bien connues, conservees (prefixes hex sans separateur) :
+# Well-known virtual MACs, kept (hex prefixes without separators):
 # HSRP 0000.0c07.acXX / HSRPv2 0000.0c9f.fXXX / VRRP 0000.5e00.01XX /
 # GLBP 0007.b40X.XXXX
 KEEP_MAC_PREFIXES = ("00000c07ac", "00000c9ff", "00005e0001", "0007b4")
 
-# Detection de secrets residuels (filet de securite en sortie)
+# Residual-secret detection (output safety net)
 RESIDUAL_RX = re.compile(
     r'\b(password|passwd|secret|community|key-string|pre-shared|passphrase|'
     r'private-key|psk)\b', _F)
-# Valeurs qui ressemblent a un hash/une cle, meme sur une ligne deja marquee
-# (hash crypt/type5/8/9 : $1$..., $6$..., $8$..., $9$... ; blobs hex 0x...)
+# Values that look like a hash/key, even on an already-marked line
+# (crypt/type5/8/9 hashes: $1$..., $6$..., $8$..., $9$... ; hex blobs 0x...)
 RESIDUAL_VALUE_RX = re.compile(r'\$(?:1|2[aby]?|5|6|8|9)\$\S{6,}|\b0x[0-9A-Fa-f]{16,}\b')
 
 
@@ -283,7 +287,7 @@ class Anonymizer:
         self.keep_descriptions = keep_descriptions
         self.keep_macs = keep_macs
 
-        # Tables de correspondance (identifiants uniquement)
+        # Mapping tables (identifiers only)
         self.hosts = {}
         self.domains = {}
         self.ipv4 = {}
@@ -291,26 +295,26 @@ class Anonymizer:
         self.macs = {}
         self.descriptions = {}
 
-        # Compteurs / pools
+        # Counters / pools
         self._host_c = count(1)
         self._domain_c = count(1)
         self._desc_c = count(1)
         self._ipv4_pool = self._hosts_of(
             "198.51.100.0/24", "203.0.113.0/24", "192.0.2.0/24",
-            "198.18.0.0/15")                      # extension RFC 2544 si >760 IP
+            "198.18.0.0/15")                     # RFC 2544 overflow (>760 IPs)
         self._ipv6_pool = (ipaddress.ip_address("2001:db8::") + i for i in count(1))
         self._mac_c = count(1)
 
-        # Cles normalisees -> alias (une meme adresse sous plusieurs ecritures
-        # recoit toujours le meme alias)
+        # Normalized keys -> alias (the same address written in several ways
+        # always receives the same alias)
         self._ipv4_norm = {}
         self._ipv6_norm = {}
         self._mac_norm = {}
 
-        # Remplacement mot-pour-mot (rempli en passe de collecte)
-        self._word_map = {}          # alias <- terme original (cle en minuscules)
-        self._word_rx = None         # termes avec lettres : bordure '.' toleree (FQDN)
-        self._word_rx_strict = None  # termes sans lettre : bordures strictes
+        # Word-for-word replacement (filled during the collection pass)
+        self._word_map = {}          # alias <- original term (lowercase key)
+        self._word_rx = None         # terms with letters: '.' allowed at edges (FQDN)
+        self._word_rx_strict = None  # letterless terms: strict boundaries
 
         # Stats
         self.stats = {"secrets": 0, "banners": 0, "certs": 0,
@@ -328,7 +332,7 @@ class Anonymizer:
         if key not in self._ipv4_norm:
             try:
                 self._ipv4_norm[key] = str(next(self._ipv4_pool))
-            except StopIteration:                   # pool epuise (>130 000 IP !)
+            except StopIteration:                # pool exhausted (>130,000 IPs!)
                 self._ipv4_norm[key] = "198.19.255.254"
         alias = self._ipv4_norm[key]
         self.ipv4[original] = alias
@@ -344,13 +348,13 @@ class Anonymizer:
 
     def _alloc_mac(self, original, sep_dot):
         digits = "".join(ch for ch in original if ch not in ".:").lower()
-        # MAC multicast/broadcast, nulle ou virtuelle bien connue : on conserve
-        # (porteuses de sens protocolaire, non identifiantes)
+        # Multicast/broadcast, all-zero or well-known virtual MAC: keep
+        # (they carry protocol meaning and are not identifying)
         if int(digits[:2], 16) & 1 or digits == "000000000000" \
                 or digits.startswith(KEEP_MAC_PREFIXES):
             return original
         if digits not in self._mac_norm:
-            # OUI d'administration locale (bit U/L a 1) -> aucun vrai materiel
+            # locally-administered OUI (U/L bit set) -> matches no real hardware
             self._mac_norm[digits] = "02%010x" % next(self._mac_c)
         raw = self._mac_norm[digits]
         if sep_dot:
@@ -360,7 +364,7 @@ class Anonymizer:
         self.macs[original] = fake
         return fake
 
-    # --- decision de conservation d'une IP ----------------------------------
+    # --- should an IP be kept as-is? -----------------------------------------
     def _keep_ip(self, ip):
         if ip.version == 4 and ip in NET0_8:
             return True
@@ -371,7 +375,7 @@ class Anonymizer:
             return False
         return not ip.is_global
 
-    # --- passe 1 : collecte hostnames / domaines ----------------------------
+    # --- pass 1: collect hostnames / domains ---------------------------------
     def collect(self, lines):
         seen_hosts, seen_domains = set(), set()
         for ln in lines:
@@ -387,10 +391,10 @@ class Anonymizer:
         for original, alias in {**self.hosts, **self.domains}.items():
             self._word_map[original.lower()] = alias
 
-        # Deux regex : les termes contenant des lettres acceptent un '.' en
-        # bordure (pour attraper les FQDN "hote.domaine.tld"), les termes
-        # purement numeriques gardent des bordures strictes (ne pas matcher
-        # dans une adresse IP). Termes les plus longs d'abord (sous-chaines).
+        # Two regexes: terms containing letters accept a '.' at their edges
+        # (to catch "host.domain.tld" FQDNs), purely numeric terms keep
+        # strict boundaries (must not match inside an IP address). Longest
+        # terms first (substrings).
         relaxed = [t for t in self._word_map if re.search(r'[a-z]', t)]
         strict = [t for t in self._word_map if t not in relaxed]
 
@@ -404,7 +408,7 @@ class Anonymizer:
         self._word_rx = build(relaxed, r'(?<![\w-])', r'(?![\w-])')
         self._word_rx_strict = build(strict, r'(?<![\w.-])', r'(?![\w.-])')
 
-    # --- remplacements unitaires --------------------------------------------
+    # --- unit replacements ----------------------------------------------------
     def _sub_words(self, line):
         for rx in (self._word_rx, self._word_rx_strict):
             if rx:
@@ -449,15 +453,15 @@ class Anonymizer:
             self.descriptions[text] = ph(f"DESCRIPTION-{next(self._desc_c)}")
         return m.group(1) + self.descriptions[text]
 
-    # --- transformation d'une ligne "normale" -------------------------------
+    # --- transformation of a "normal" line ------------------------------------
     def transform_line(self, line):
-        # 1) destruction des secrets
+        # 1) destroy secrets
         for rx, repl in SECRET_RULES:
             new = rx.sub(repl, line)
             if new != line:
                 self.stats["secrets"] += 1
                 line = new
-        # 2) location / contact -> marqueur
+        # 2) location / contact -> marker
         if LOCATION_RX.match(line):
             self.stats["locations"] += 1
             return LOCATION_RX.sub(r'\1' + S_LOCATION, line)
@@ -467,20 +471,20 @@ class Anonymizer:
         # 3) descriptions
         if not self.keep_descriptions:
             line = self._sub_description(line)
-        # 4) emails
+        # 4) e-mails
         if EMAIL_RX.search(line):
             self.stats["emails"] += len(EMAIL_RX.findall(line))
             line = EMAIL_RX.sub(S_EMAIL, line)
-        # 5) hostnames / domaines (mot-pour-mot, coherent)
+        # 5) hostnames / domains (word-for-word, consistent)
         line = self._sub_words(line)
-        # 6) adresses
+        # 6) addresses
         line = self._sub_ipv4(line)
         line = self._sub_ipv6(line)
         if not self.keep_macs:
             line = self._sub_macs(line)
         return line
 
-    # --- passe 2 : traitement avec gestion des blocs multi-lignes -----------
+    # --- pass 2: processing with multi-line block handling --------------------
     def process(self, lines):
         out = []
         i, n = 0, len(lines)
@@ -488,29 +492,29 @@ class Anonymizer:
             line = lines[i]
             stripped = line.strip()
 
-            # bloc PEM
+            # PEM block
             if PEM_BEGIN_RX.search(line):
                 out.append(self._indent(line) + S_CERT)
                 self.stats["certs"] += 1
                 i += 1
                 while i < n and not PEM_END_RX.search(lines[i]):
                     i += 1
-                i += 1                              # saute la ligne END
+                i += 1                              # skip the END line
                 continue
 
-            # banniere
+            # banner
             mb = BANNER_RX.match(line)
             if mb:
                 head, rest = mb.group(1), mb.group(2)
                 self.stats["banners"] += 1
                 rest_s = rest.strip()
                 if rest_s:
-                    # delimiteur : un seul char, ou sequence "^X" (ex. ^C)
+                    # delimiter: a single char, or a "^X" sequence (e.g. ^C)
                     if rest_s.startswith("^") and len(rest_s) >= 2 and rest_s[1].isalpha():
                         delim = rest_s[:2]
                     else:
                         delim = rest_s[0]
-                    # banniere mono-ligne : delimiteur present 2 fois
+                    # single-line banner: delimiter present twice
                     if rest_s.count(delim) >= 2:
                         out.append(f"{head} {delim}{S_BANNER}{delim}")
                         i += 1
@@ -519,10 +523,10 @@ class Anonymizer:
                     i += 1
                     while i < n and delim not in lines[i]:
                         i += 1
-                    i += 1                          # saute la ligne de fin
+                    i += 1                          # skip the closing line
                     continue
                 else:
-                    # style EOS : termine par une ligne "EOF"
+                    # EOS style: terminated by an "EOF" line
                     out.append(f"{head} ^C{S_BANNER}^C")
                     i += 1
                     while i < n and lines[i].strip() != "EOF":
@@ -530,7 +534,7 @@ class Anonymizer:
                     i += 1
                     continue
 
-            # blob hexa (certificat / cle IOS)
+            # hex blob (IOS certificate / key)
             if self._is_hexblob(stripped):
                 out.append(self._indent(line) + S_CERT)
                 self.stats["certs"] += 1
@@ -545,12 +549,12 @@ class Anonymizer:
                     break
                 continue
 
-            # ligne normale
+            # normal line
             out.append(self.transform_line(line))
             i += 1
         return out
 
-    # --- utilitaires --------------------------------------------------------
+    # --- helpers --------------------------------------------------------------
     @staticmethod
     def _indent(line):
         return line[:len(line) - len(line.lstrip())]
@@ -564,9 +568,9 @@ class Anonymizer:
 
     def mapping(self):
         return {
-            "_avertissement": ("Fichier de correspondance pour DE-anonymiser les "
-                               "reponses de l'IA. A CONSERVER EN LOCAL. Ne jamais "
-                               "transmettre a l'IA ou a un tiers."),
+            "_warning": ("Mapping table used to DE-anonymize the AI's answers. "
+                         "KEEP THIS FILE LOCAL. Never send it to the AI or to "
+                         "any third party."),
             "hosts": self.hosts,
             "domains": self.domains,
             "ipv4": self.ipv4,
@@ -578,11 +582,11 @@ class Anonymizer:
 
 # ---------------------------------------------------------------------------
 def residual_warnings(lines, limit=20):
-    """Repere les lignes qui ressemblent encore a un secret (a relire)."""
+    """Spot output lines that still look like a secret (to be reviewed)."""
     flagged = []
     for idx, ln in enumerate(lines, 1):
-        # mots-cles suspects sur une ligne non traitee, OU valeur qui
-        # ressemble a un hash/une cle meme sur une ligne deja marquee
+        # suspicious keywords on an unprocessed line, OR a value that looks
+        # like a hash/key even on an already-marked line
         suspicious = RESIDUAL_VALUE_RX.search(ln) or (
             "<SANITIZED" not in ln and RESIDUAL_RX.search(ln))
         if suspicious:
@@ -594,29 +598,32 @@ def residual_warnings(lines, limit=20):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Anonymise une configuration Cisco/Arista pour ingestion par une IA.")
+        prog="netanom",
+        description="Sanitize a Cisco/Arista configuration before sharing it "
+                    "with an AI (or any third party).")
     p.add_argument("input", nargs="?", default="-",
-                   help="Fichier de config (ou '-' / vide pour stdin).")
+                   help="Configuration file ('-' or empty for stdin).")
     p.add_argument("-o", "--output", default="-",
-                   help="Fichier de sortie (defaut : stdout).")
+                   help="Output file (default: stdout).")
     p.add_argument("-m", "--map", dest="mapfile", default=None,
-                   help="Ecrit la table de correspondance JSON (a garder en local).")
+                   help="Write the JSON mapping table (keep it local, never share it).")
     p.add_argument("--anonymize-all-ips", action="store_true",
-                   help="Anonymise aussi les IP privees (RFC1918), pas seulement publiques.")
+                   help="Also anonymize private (RFC 1918) addresses, not only public ones.")
     p.add_argument("--keep-descriptions", action="store_true",
-                   help="Conserve les descriptions d'interface telles quelles.")
+                   help="Keep interface descriptions as-is (e-mails/IPs/hostnames "
+                        "inside them are still processed).")
     p.add_argument("--keep-macs", action="store_true",
-                   help="Conserve les adresses MAC telles quelles.")
+                   help="Keep MAC addresses as-is.")
     p.add_argument("--no-summary", action="store_true",
-                   help="N'affiche pas le recapitulatif sur stderr.")
+                   help="Do not print the summary on stderr.")
     p.add_argument("--strict", action="store_true",
-                   help="Termine avec le code retour 2 si des lignes residuelles "
-                        "suspectes subsistent (utilisable en CI / pipeline).")
+                   help="Exit with status 2 if suspicious residual lines remain "
+                        "(useful in CI pipelines).")
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     args = p.parse_args()
 
-    # lecture
+    # read
     if args.input == "-":
         data = sys.stdin.read()
     else:
@@ -624,7 +631,7 @@ def main():
             with open(args.input, "r", encoding="utf-8", errors="replace") as f:
                 data = f.read()
         except OSError as e:
-            sys.exit(f"sanitize_netconfig: lecture impossible : {e}")
+            sys.exit(f"netanom: cannot read input: {e}")
     lines = data.splitlines()
 
     anon = Anonymizer(anon_all_ips=args.anonymize_all_ips,
@@ -633,7 +640,7 @@ def main():
     anon.collect(lines)
     result = anon.process(lines)
 
-    # ecriture
+    # write
     body = "\n".join(result) + ("\n" if data.endswith("\n") else "")
     if args.output == "-":
         sys.stdout.write(body)
@@ -642,39 +649,39 @@ def main():
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(body)
         except OSError as e:
-            sys.exit(f"sanitize_netconfig: ecriture impossible : {e}")
+            sys.exit(f"netanom: cannot write output: {e}")
 
     if args.mapfile:
         try:
             with open(args.mapfile, "w", encoding="utf-8") as f:
                 json.dump(anon.mapping(), f, ensure_ascii=False, indent=2)
         except OSError as e:
-            sys.exit(f"sanitize_netconfig: ecriture de la table impossible : {e}")
+            sys.exit(f"netanom: cannot write mapping file: {e}")
 
     flagged = residual_warnings(result)
 
-    # recapitulatif + alerte residuelle (sur stderr pour ne pas polluer stdout)
+    # summary + residual alert (on stderr, keeping stdout clean)
     if not args.no_summary:
         s = anon.stats
-        print("--- Recapitulatif d'anonymisation ---", file=sys.stderr)
-        print(f"  Secrets detruits        : {s['secrets']}", file=sys.stderr)
-        print(f"  Bannieres               : {s['banners']}", file=sys.stderr)
-        print(f"  Certificats / cles      : {s['certs']}", file=sys.stderr)
-        print(f"  E-mails                 : {s['emails']}", file=sys.stderr)
-        print(f"  Locations / contacts    : {s['locations']} / {s['contacts']}", file=sys.stderr)
-        print(f"  Hostnames pseudonymises : {len(anon.hosts)}", file=sys.stderr)
-        print(f"  Domaines                : {len(anon.domains)}", file=sys.stderr)
-        print(f"  IPv4 / IPv6             : {len(anon.ipv4)} / {len(anon.ipv6)}", file=sys.stderr)
-        print(f"  MAC                     : {len(anon.macs)}", file=sys.stderr)
-        print(f"  Descriptions            : {len(anon.descriptions)}", file=sys.stderr)
+        print("--- Sanitization summary ---", file=sys.stderr)
+        print(f"  Secrets destroyed        : {s['secrets']}", file=sys.stderr)
+        print(f"  Banners                  : {s['banners']}", file=sys.stderr)
+        print(f"  Certificates / keys      : {s['certs']}", file=sys.stderr)
+        print(f"  E-mail addresses         : {s['emails']}", file=sys.stderr)
+        print(f"  Locations / contacts     : {s['locations']} / {s['contacts']}", file=sys.stderr)
+        print(f"  Hostnames pseudonymized  : {len(anon.hosts)}", file=sys.stderr)
+        print(f"  Domains                  : {len(anon.domains)}", file=sys.stderr)
+        print(f"  IPv4 / IPv6              : {len(anon.ipv4)} / {len(anon.ipv6)}", file=sys.stderr)
+        print(f"  MAC addresses            : {len(anon.macs)}", file=sys.stderr)
+        print(f"  Descriptions             : {len(anon.descriptions)}", file=sys.stderr)
 
         if flagged:
-            print("\n  /!\\ Lignes a RELIRE (secret potentiel non neutralise) :",
+            print("\n  /!\\ Lines to REVIEW (potential secret not neutralized):",
                   file=sys.stderr)
             for idx, ln in flagged:
                 print(f"     L{idx}: {ln}", file=sys.stderr)
         else:
-            print("\n  Aucun secret residuel detecte par l'heuristique.",
+            print("\n  No residual secret detected by the heuristic.",
                   file=sys.stderr)
 
     if args.strict and flagged:
