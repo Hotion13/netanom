@@ -58,6 +58,8 @@ PSEUDONYMIZED IDENTIFIERS (consistent):
     -> example-N.net (replaced everywhere, including as an FQDN suffix)
   - public IPv4 addresses -> RFC 5737 documentation ranges, then
     198.18.0.0/15 (RFC 2544) beyond ~760 distinct addresses
+    (--keep-ips to keep every address as-is; --anonymize-all-ips to also
+    anonymize private RFC 1918 addresses — the two are mutually exclusive)
   - public IPv6 addresses -> 2001:db8::/32 (RFC 3849)
   - MAC addresses -> fictitious locally-administered MACs (format preserved,
     consistent across the aabb.ccdd.eeff and aa:bb:cc:dd:ee:ff notations);
@@ -85,6 +87,7 @@ Usage
   python3 sanitize_netconfig.py config.txt -o config.san.txt -m config.map.json
   cat config.txt | python3 sanitize_netconfig.py - > config.san.txt
   python3 sanitize_netconfig.py config.txt --anonymize-all-ips --keep-descriptions
+  python3 sanitize_netconfig.py config.txt --keep-ips   # keep all IP addresses
   python3 sanitize_netconfig.py config.txt --strict   # exit code 2 on residue
 """
 
@@ -95,7 +98,7 @@ import re
 import sys
 from itertools import count
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Markers
@@ -282,10 +285,17 @@ RESIDUAL_VALUE_RX = re.compile(r'\$(?:1|2[aby]?|5|6|8|9)\$\S{6,}|\b0x[0-9A-Fa-f]
 
 # ---------------------------------------------------------------------------
 class Anonymizer:
-    def __init__(self, anon_all_ips=False, keep_descriptions=False, keep_macs=False):
+    def __init__(self, anon_all_ips=False, keep_descriptions=False, keep_macs=False,
+                 keep_ips=False):
+        if anon_all_ips and keep_ips:
+            raise ValueError("anon_all_ips and keep_ips are mutually exclusive")
         self.anon_all_ips = anon_all_ips
         self.keep_descriptions = keep_descriptions
         self.keep_macs = keep_macs
+        self.keep_ips = keep_ips
+        # Distinct public addresses left in clear because of keep_ips
+        # (reported in the summary: the addressing plan is being disclosed)
+        self.kept_public_ips = set()
 
         # Mapping tables (identifiers only)
         self.hosts = {}
@@ -424,6 +434,9 @@ class Anonymizer:
                 return m.group(0)
             if self._keep_ip(ip):
                 return m.group(0)
+            if self.keep_ips:
+                self.kept_public_ips.add(str(ip))
+                return m.group(0)
             return self._alloc_ipv4(addr, ip) + prefix
         return IPV4_RX.sub(repl, line)
 
@@ -435,6 +448,9 @@ class Anonymizer:
             except ValueError:
                 return m.group(0)
             if ip.version != 6 or self._keep_ip(ip):
+                return m.group(0)
+            if self.keep_ips:
+                self.kept_public_ips.add(ip.compressed.lower())
                 return m.group(0)
             return self._alloc_ipv6(addr, ip) + prefix
         return IPV6_RX.sub(repl, line)
@@ -573,8 +589,8 @@ class Anonymizer:
                          "any third party."),
             "hosts": self.hosts,
             "domains": self.domains,
-            "ipv4": self.ipv4,
-            "ipv6": self.ipv6,
+            "ipv4": self.ipv4 if not self.keep_ips else {},
+            "ipv6": self.ipv6 if not self.keep_ips else {},
             "macs": self.macs if not self.keep_macs else {},
             "descriptions": self.descriptions if not self.keep_descriptions else {},
         }
@@ -607,8 +623,14 @@ def main():
                    help="Output file (default: stdout).")
     p.add_argument("-m", "--map", dest="mapfile", default=None,
                    help="Write the JSON mapping table (keep it local, never share it).")
-    p.add_argument("--anonymize-all-ips", action="store_true",
-                   help="Also anonymize private (RFC 1918) addresses, not only public ones.")
+    ip_group = p.add_mutually_exclusive_group()
+    ip_group.add_argument("--anonymize-all-ips", action="store_true",
+                          help="Also anonymize private (RFC 1918) addresses, "
+                               "not only public ones.")
+    ip_group.add_argument("--keep-ips", action="store_true",
+                          help="Keep ALL IP addresses (IPv4/IPv6) as-is, including "
+                               "public ones. WARNING: the output then discloses "
+                               "your addressing plan.")
     p.add_argument("--keep-descriptions", action="store_true",
                    help="Keep interface descriptions as-is (e-mails/IPs/hostnames "
                         "inside them are still processed).")
@@ -636,7 +658,8 @@ def main():
 
     anon = Anonymizer(anon_all_ips=args.anonymize_all_ips,
                       keep_descriptions=args.keep_descriptions,
-                      keep_macs=args.keep_macs)
+                      keep_macs=args.keep_macs,
+                      keep_ips=args.keep_ips)
     anon.collect(lines)
     result = anon.process(lines)
 
@@ -674,6 +697,11 @@ def main():
         print(f"  IPv4 / IPv6              : {len(anon.ipv4)} / {len(anon.ipv6)}", file=sys.stderr)
         print(f"  MAC addresses            : {len(anon.macs)}", file=sys.stderr)
         print(f"  Descriptions             : {len(anon.descriptions)}", file=sys.stderr)
+
+        if anon.kept_public_ips:
+            print(f"\n  /!\\ --keep-ips: {len(anon.kept_public_ips)} public IP "
+                  "address(es) left in clear — the output discloses your "
+                  "addressing plan.", file=sys.stderr)
 
         if flagged:
             print("\n  /!\\ Lines to REVIEW (potential secret not neutralized):",
