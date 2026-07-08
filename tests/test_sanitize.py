@@ -1,12 +1,13 @@
-# -*- coding: utf-8 -*-
-"""Tests de sanitize_netconfig.py — stdlib uniquement (unittest).
+"""Tests for sanitize_netconfig.py — stdlib only (unittest).
 
-Lancer :  python3 -m unittest discover -s tests -v
+Run with:  python3 -m unittest discover -s tests -v
 """
 
+import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -18,7 +19,7 @@ SCRIPT = ROOT / "sanitize_netconfig.py"
 
 
 def sanitize(text, **kwargs):
-    """Pipeline complet collect + process, retourne (sortie, anonymizer)."""
+    """Full collect + process pipeline; returns (output, anonymizer)."""
     anon = sn.Anonymizer(**kwargs)
     lines = text.splitlines()
     anon.collect(lines)
@@ -57,10 +58,10 @@ class TestSecrets(unittest.TestCase):
         self.assertNotIn("admin@corp.com", out)
         self.assertIn(sn.S_SSHKEY, out)
 
-    # --- regressions : fuites corrigees -------------------------------------
+    # --- regressions: fixed leaks --------------------------------------------
     def test_ospf_message_digest_key_number_in_type_set(self):
-        # Le numero de cle 5 declenchait la regle inline "key 5 ..." qui
-        # detruisait "md5" et laissait fuir le secret.
+        # Key number 5 used to trigger the inline "key 5 ..." rule, which
+        # destroyed "md5" and let the actual secret leak.
         out, _ = sanitize("ip ospf message-digest-key 5 md5 OspfS3cret")
         self.assertNotIn("OspfS3cret", out)
         self.assertIn("md5", out)
@@ -75,8 +76,8 @@ class TestSecrets(unittest.TestCase):
         self.assertNotIn("141B1309", out)
 
     def test_isakmp_key_with_encryption_type(self):
-        # "crypto isakmp key 6 SECRET address x" : le 6 etait detruit a la
-        # place du secret.
+        # "crypto isakmp key 6 SECRET address x": the 6 used to be destroyed
+        # instead of the secret.
         out, _ = sanitize("crypto isakmp key 6 IsakmpS3cret address 198.51.100.99")
         self.assertNotIn("IsakmpS3cret", out)
         self.assertIn("address", out)
@@ -166,7 +167,7 @@ class TestSnmp(unittest.TestCase):
         self.assertNotIn("public", out)
 
     def test_host_with_vrf(self):
-        # La forme vrf laissait fuir la communaute (lookahead trop strict).
+        # The vrf form used to leak the community (over-strict lookahead).
         out, _ = sanitize("snmp-server host 10.1.1.1 vrf MGMT version 2c C0mmun1ty")
         self.assertNotIn("C0mmun1ty", out)
         self.assertIn("vrf MGMT", out)
@@ -182,7 +183,7 @@ class TestSnmp(unittest.TestCase):
         self.assertEqual(out, line)
 
     def test_nxos_user_priv_hex(self):
-        # NX-OS "priv 0x..." (sans mot-cle d'algo) fuyait silencieusement.
+        # NX-OS "priv 0x..." (no algorithm keyword) used to leak silently.
         out, _ = sanitize("snmp-server user admin network-admin "
                           "auth md5 0x1a2b3c4d5e priv 0x5e4d3c2b1a localizedkey")
         self.assertNotIn("0x1a2b3c4d5e", out)
@@ -190,7 +191,7 @@ class TestSnmp(unittest.TestCase):
         self.assertIn("localizedkey", out)
 
     def test_priv_aes_dash_form(self):
-        # "priv aes-128 KEY" (tiret) fuyait silencieusement.
+        # "priv aes-128 KEY" (hyphenated) used to leak silently.
         out, _ = sanitize("snmp-server user ops grp v3 auth sha AuthPass priv aes-128 PrivPass")
         self.assertNotIn("AuthPass", out)
         self.assertNotIn("PrivPass", out)
@@ -200,17 +201,17 @@ class TestSnmp(unittest.TestCase):
         self.assertNotIn("S3cretAuth", out)
 
     def test_location_contact(self):
-        out, _ = sanitize("snmp-server location 12 rue de la Paix, Paris\n"
-                          "snmp-server contact Jean Dupont 0601020304")
+        out, _ = sanitize("snmp-server location Building 7, Paris DC, rack B12\n"
+                          "snmp-server contact John Smith +1 555 0100")
         self.assertNotIn("Paris", out)
-        self.assertNotIn("Dupont", out)
+        self.assertNotIn("Smith", out)
         self.assertIn(sn.S_LOCATION, out)
         self.assertIn(sn.S_CONTACT, out)
 
 
 class TestIdentifiers(unittest.TestCase):
     def test_hostname_and_fqdn(self):
-        # Un FQDN "hote.domaine" fuyait entierement (bordures interdisant '.').
+        # A "host.domain" FQDN used to leak entirely (boundaries rejected '.').
         cfg = ("hostname SW-CORE\n"
                "ip domain-name corp.example\n"
                "ntp server sw-core.corp.example\n")
@@ -233,7 +234,7 @@ class TestIdentifiers(unittest.TestCase):
         out, anon = sanitize(cfg)
         self.assertNotIn("8.8.8.8", out)
         self.assertNotIn("11.22.33.44", out)
-        # meme original -> meme alias sur les deux lignes
+        # same original -> same alias on both lines
         alias = anon.ipv4["8.8.8.8"]
         self.assertEqual(out.count(alias), 2)
 
@@ -246,11 +247,11 @@ class TestIdentifiers(unittest.TestCase):
         out, _ = sanitize("interface Vlan10\n ip address 192.168.1.1 255.255.255.0",
                           anon_all_ips=True)
         self.assertNotIn("192.168.1.1", out)
-        self.assertIn("255.255.255.0", out)   # masque conserve
+        self.assertIn("255.255.255.0", out)   # netmask preserved
 
     def test_ipv4_pool_no_duplicate_after_doc_ranges(self):
-        # >762 IP publiques distinctes : l'ancien code retombait sur une
-        # adresse unique dupliquee, cassant la coherence de la table.
+        # >762 distinct public IPs: the old code fell back to a single
+        # duplicated address, breaking the mapping table consistency.
         lines = [f"ip route 11.{i // 200}.{i % 200}.1 255.255.255.255 Null0"
                  for i in range(800)]
         _, anon = sanitize("\n".join(lines))
@@ -275,7 +276,7 @@ class TestIdentifiers(unittest.TestCase):
         self.assertNotIn("aabb.ccdd.eeff", out)
         self.assertNotIn("aa:bb:cc:dd:ee:ff", out)
         digits = {v.replace(".", "").replace(":", "") for v in anon.macs.values()}
-        self.assertEqual(len(digits), 1)      # meme MAC -> meme alias
+        self.assertEqual(len(digits), 1)      # same MAC -> same alias
 
     def test_mac_multicast_and_virtual_kept(self):
         for line in ("mac address-table static 0100.5e00.0001 vlan 1 interface Gi1/0/1",
@@ -290,17 +291,17 @@ class TestIdentifiers(unittest.TestCase):
         self.assertIn(sn.S_EMAIL, out)
 
     def test_descriptions_tokenized_coherently(self):
-        cfg = ("interface Gi1/0/1\n description Lien WAN Orange CT-12345\n"
-               "interface Gi1/0/2\n description Lien WAN Orange CT-12345\n"
-               "interface Gi1/0/3\n description Autre lien\n")
+        cfg = ("interface Gi1/0/1\n description WAN link Orange CT-12345\n"
+               "interface Gi1/0/2\n description WAN link Orange CT-12345\n"
+               "interface Gi1/0/3\n description Some other link\n")
         out, anon = sanitize(cfg)
         self.assertNotIn("CT-12345", out)
         self.assertEqual(len(anon.descriptions), 2)
 
     def test_keep_descriptions(self):
-        out, _ = sanitize("interface Gi1\n description Lien WAN CT-12345",
+        out, _ = sanitize("interface Gi1\n description WAN link CT-12345",
                           keep_descriptions=True)
-        self.assertIn("Lien WAN CT-12345", out)
+        self.assertIn("WAN link CT-12345", out)
 
 
 class TestBlocks(unittest.TestCase):
@@ -363,8 +364,8 @@ class TestResidual(unittest.TestCase):
         self.assertEqual(flagged, [])
 
     def test_hash_value_flagged_even_with_marker(self):
-        # Une valeur type hash restee sur une ligne partiellement traitee
-        # doit quand meme remonter.
+        # A hash-looking value left on a partially processed line must still
+        # be reported.
         flagged = sn.residual_warnings(
             ["something " + sn.S_SECRET + " leftover $6$roundsalt$abcdef012345"])
         self.assertEqual(len(flagged), 1)
@@ -381,7 +382,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn(sn.S_SECRET, r.stdout)
         self.assertNotIn("$1$abc$def", r.stdout)
-        self.assertIn("Recapitulatif", r.stderr)
+        self.assertIn("Sanitization summary", r.stderr)
 
     def test_no_summary(self):
         r = self.run_cli(["-", "--no-summary"], "hostname R1\n")
@@ -395,7 +396,18 @@ class TestCli(unittest.TestCase):
     def test_missing_input_file_friendly_error(self):
         r = self.run_cli(["/nonexistent/file.txt"], "")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("lecture impossible", r.stderr)
+        self.assertIn("cannot read", r.stderr)
+
+    def test_map_file_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mapfile = pathlib.Path(tmp) / "out.map.json"
+            r = self.run_cli(["-", "--no-summary", "-m", str(mapfile)],
+                             "hostname R1\nip route 8.8.8.8 255.255.255.255 Null0\n")
+            self.assertEqual(r.returncode, 0)
+            data = json.loads(mapfile.read_text(encoding="utf-8"))
+            self.assertIn("_warning", data)
+            self.assertEqual(data["hosts"], {"R1": "device-1"})
+            self.assertIn("8.8.8.8", data["ipv4"])
 
 
 if __name__ == "__main__":
