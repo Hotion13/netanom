@@ -130,6 +130,9 @@ show_run_output | netanom - > config.san.txt
 # also anonymize private IPs, keep interface descriptions
 netanom config.txt --anonymize-all-ips --keep-descriptions
 
+# lab / documentation config: keep every IP address as-is
+netanom config.txt --keep-ips
+
 # CI / pipeline gate: fail if anything suspicious remains
 netanom config.txt -o config.san.txt --strict
 ```
@@ -144,7 +147,8 @@ them** before sharing the output.
 |---|---|
 | `-o, --output FILE` | Output file (default: stdout) |
 | `-m, --map FILE` | Write the JSON mapping table (keep it local, **never** share it) |
-| `--anonymize-all-ips` | Also anonymize private (RFC 1918) addresses, not only public ones |
+| `--anonymize-all-ips` | Also anonymize private (RFC 1918) addresses, not only public ones (mutually exclusive with `--keep-ips`) |
+| `--keep-ips` | Keep **all** IP addresses (IPv4/IPv6) as-is, including public ones — the summary then warns how many public addresses were left in clear |
 | `--keep-descriptions` | Keep interface descriptions as-is (e-mails/IPs/hostnames inside them are still processed) |
 | `--keep-macs` | Keep MAC addresses as-is |
 | `--no-summary` | Do not print the summary on stderr |
@@ -215,6 +219,11 @@ them** before sharing the output.
 ## What is deliberately preserved
 
 - private (RFC 1918) IPv4 addresses — unless `--anonymize-all-ips`
+- **all** IP addresses when `--keep-ips` is set — useful for lab or
+  documentation configs, or when correlating with external logs
+  (traceroutes, firewall logs) requires the real addresses; secrets are
+  still destroyed, and the stderr summary warns how many public addresses
+  were left in clear
 - documentation, multicast, loopback, link-local, unspecified and reserved
   addresses; netmasks and wildcard masks; `0.0.0.0/8`
 - multicast/broadcast MACs and well-known virtual MACs (HSRP, VRRP, GLBP)

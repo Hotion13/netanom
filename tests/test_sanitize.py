@@ -249,6 +249,44 @@ class TestIdentifiers(unittest.TestCase):
         self.assertNotIn("192.168.1.1", out)
         self.assertIn("255.255.255.0", out)   # netmask preserved
 
+    def test_keep_ips_public_v4_kept(self):
+        line = "ip route 8.8.8.8 255.255.255.255 11.22.33.44"
+        out, anon = sanitize(line, keep_ips=True)
+        self.assertEqual(out, line)
+        self.assertEqual(anon.mapping()["ipv4"], {})
+        self.assertEqual(anon.kept_public_ips, {"8.8.8.8", "11.22.33.44"})
+
+    def test_keep_ips_public_v6_kept(self):
+        line = "ipv6 route 2400:cb00::/32 Null0"
+        out, anon = sanitize(line, keep_ips=True)
+        self.assertEqual(out, line)
+        self.assertEqual(anon.mapping()["ipv6"], {})
+        self.assertEqual(anon.kept_public_ips, {"2400:cb00::"})
+
+    def test_keep_ips_counts_distinct_addresses(self):
+        cfg = "logging host 8.8.8.8\nntp server 8.8.8.8\nntp server 9.9.9.9\n"
+        _, anon = sanitize(cfg, keep_ips=True)
+        self.assertEqual(len(anon.kept_public_ips), 2)
+
+    def test_keep_ips_secrets_still_destroyed(self):
+        out, _ = sanitize("neighbor 203.0.113.5 password 7 0822455D0A16",
+                          keep_ips=True)
+        self.assertIn("neighbor 203.0.113.5", out)
+        self.assertNotIn("0822455D0A16", out)
+
+    def test_keep_ips_other_identifiers_still_processed(self):
+        cfg = ("hostname SW-CORE\n"
+               "logging host 8.8.8.8\n"
+               "arp 10.0.0.5 aa:bb:cc:dd:ee:ff arpa\n")
+        out, _ = sanitize(cfg, keep_ips=True)
+        self.assertNotIn("SW-CORE", out)
+        self.assertNotIn("aa:bb:cc:dd:ee:ff", out)
+        self.assertIn("8.8.8.8", out)
+
+    def test_keep_ips_conflicts_with_anonymize_all_ips(self):
+        with self.assertRaises(ValueError):
+            sn.Anonymizer(anon_all_ips=True, keep_ips=True)
+
     def test_ipv4_pool_no_duplicate_after_doc_ranges(self):
         # >762 distinct public IPs: the old code fell back to a single
         # duplicated address, breaking the mapping table consistency.
@@ -392,6 +430,17 @@ class TestCli(unittest.TestCase):
         r = self.run_cli(["-", "--strict", "--no-summary"],
                          "some unknown passphrase thing\n")
         self.assertEqual(r.returncode, 2)
+
+    def test_keep_ips_flag_and_warning(self):
+        r = self.run_cli(["-", "--keep-ips"], "logging host 8.8.8.8\n")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("8.8.8.8", r.stdout)
+        self.assertIn("--keep-ips: 1 public IP", r.stderr)
+
+    def test_keep_ips_and_anonymize_all_ips_rejected(self):
+        r = self.run_cli(["-", "--keep-ips", "--anonymize-all-ips"], "")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not allowed with", r.stderr)
 
     def test_missing_input_file_friendly_error(self):
         r = self.run_cli(["/nonexistent/file.txt"], "")
